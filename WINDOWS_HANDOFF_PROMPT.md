@@ -22,8 +22,9 @@ I have cloned my GitHub repository (`https://github.com/Raakshass/so-101.git`) w
 ### Your Tasks
 Please guide me step-by-step through the following process. Do not rush, let's do this methodically:
 
-**Step 1: Environment Setup**
+**Step 1: Environment & Calibration Setup**
 Ensure I have a Conda environment called `lerobot` with Python 3.10 and all the correct dependencies installed for Windows (including PyTorch with CUDA if applicable).
+*CRITICAL:* We already calibrated the motors on macOS. Please copy the `calibration_backup` folder from this repository into the Windows equivalent of `~/.cache/huggingface/lerobot/calibration/` (or `.lerobot/calibration/`) so we don't have to recalibrate!
 
 **Step 2: Serial Port Configuration**
 The custom scripts `record_episode.py` currently hardcode macOS serial ports (e.g., `/dev/tty.usbmodem...`). 

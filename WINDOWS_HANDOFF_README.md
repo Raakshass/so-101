@@ -21,6 +21,7 @@ To avoid this on Windows, **we must strictly verify the camera indices before re
 1. `scan_motors.py`: Scans and identifies the serial ports of the Dynamixel motors for the Follower arm.
 2. `scan_leader.py`: Scans and identifies the serial port of the Dynamixel motors for the Leader arm.
 3. `record_episode.py`: The main data collection script. It connects to the cameras, initializes the leader and follower arms, and provides a CLI (`start`, `stop`, `quit`) to record demonstrations. It saves episodes directly to `~/.cache/huggingface/lerobot/siddhantjain/pick_bottle_training/`.
+4. `calibration_backup/`: A backup of the SO-100 motor calibration files from the macOS machine.
 
 ## Setup Instructions for Windows
 1. **Install Anaconda/Miniconda** if you haven't already.
