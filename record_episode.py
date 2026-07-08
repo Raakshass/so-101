@@ -1,14 +1,18 @@
 #!/usr/bin/env python
 """
-Simple pick-and-place recording script.
+Pick-and-place recording script for SO-100 arms on Windows.
 Control via stdin: type 'start' to begin recording, 'stop' to end.
-Uses raw cv2.VideoCapture with background threads for high FPS on macOS.
+Uses DirectShow backend and background threads for reliable Windows capture.
+
+Supports multi-episode loop: after each episode, prompts for the next one
+without needing to restart the script or re-initialize hardware.
 """
 import sys
 import os
 import time
 import json
 import threading
+import platform
 import cv2
 import numpy as np
 
@@ -16,6 +20,11 @@ from lerobot.robots.so_follower.so_follower import SOFollower
 from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
 from lerobot.teleoperators.so_leader.so_leader import SOLeader
 from lerobot.teleoperators.so_leader.config_so_leader import SOLeaderTeleopConfig
+
+
+# ── Platform-aware camera backend ──────────────────────────────
+IS_WINDOWS = platform.system() == "Windows"
+CAM_BACKEND = cv2.CAP_DSHOW if IS_WINDOWS else cv2.CAP_ANY
 
 
 class ThreadedCamera:
@@ -27,9 +36,9 @@ class ThreadedCamera:
         self.lock = threading.Lock()
         self.running = False
         self.thread = None
-        
+
         for attempt in range(5):
-            cap = cv2.VideoCapture(index)
+            cap = cv2.VideoCapture(index, CAM_BACKEND)
             if cap.isOpened():
                 # Verify we can actually read a frame
                 for _ in range(30):
@@ -46,6 +55,15 @@ class ThreadedCamera:
 
     def is_opened(self):
         return self.cap is not None and self.cap.isOpened()
+
+    def resolution(self):
+        """Return (width, height) of the camera."""
+        if self.cap is None:
+            return (0, 0)
+        return (
+            int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        )
 
     def start(self):
         """Start the background reading thread."""
@@ -76,80 +94,9 @@ class ThreadedCamera:
             self.cap.release()
 
 
-def main():
-    follower_port = sys.argv[1] if len(sys.argv) > 1 else "/dev/tty.usbmodem5A7C1208251"
-    leader_port = sys.argv[2] if len(sys.argv) > 2 else "/dev/tty.usbmodem5AAF2883381"
-    save_dir = sys.argv[3] if len(sys.argv) > 3 else os.path.expanduser(
-        "~/.cache/huggingface/lerobot/siddhantjain/pick_bottle_training"
-    )
+def record_single_episode(episode_num, save_dir, cams, follower, leader, fps_target=15):
+    """Record a single episode. Returns True if successful, False if user quit."""
 
-    os.makedirs(save_dir, exist_ok=True)
-
-    # Figure out next episode number
-    existing = [d for d in os.listdir(save_dir) if d.startswith("episode_")]
-    episode_num = len(existing)
-
-    # --- Connect cameras first ---
-    print("Connecting cameras...")
-    cams = []
-    cam_map = {"cam_wrist": 1, "cam_high": 0}
-    for name, idx in cam_map.items():
-        print(f"  Opening {name} (index {idx})...", flush=True)
-        tcam = ThreadedCamera(idx)
-        if tcam.is_opened():
-            if tcam.start():
-                cams.append((name, tcam))
-                print(f"  Connected {name} -> camera index {idx}", flush=True)
-            else:
-                print(f"  WARNING: {name} (index {idx}) opened but no frames!", flush=True)
-                tcam.release()
-        else:
-            print(f"  WARNING: {name} (index {idx}) failed to open!", flush=True)
-
-    if not cams:
-        print("  FATAL: No cameras found! Exiting.")
-        return
-
-    # --- Connect robot arms ---
-    print("Connecting follower arm...")
-    follower_cfg = SOFollowerRobotConfig(port=follower_port, id="my_follower")
-    follower = SOFollower(follower_cfg)
-    follower.connect()
-    print("  Follower connected.")
-
-    print("Connecting leader arm...")
-    leader_cfg = SOLeaderTeleopConfig(port=leader_port, id="my_leader")
-    leader = SOLeader(leader_cfg)
-    leader.connect()
-    print("  Leader connected.")
-
-    print()
-    print("=" * 60)
-    print(f"  READY TO RECORD EPISODE {episode_num}")
-    print("  Type 'start' and press Enter to begin recording.")
-    print("  Type 'stop' and press Enter to stop and save.")
-    print("  Type 'quit' to exit without recording.")
-    print("=" * 60)
-    print()
-    sys.stdout.flush()
-
-    # --- Wait for 'start' command ---
-    while True:
-        cmd = input(">> ").strip().lower()
-        if cmd == "start":
-            break
-        elif cmd == "quit":
-            print("Quitting without recording.")
-            follower.disconnect()
-            leader.disconnect()
-            for _, c in cams:
-                c.release()
-            return
-        else:
-            print(f"Unknown command '{cmd}'. Type 'start' or 'quit'.")
-            sys.stdout.flush()
-
-    # --- Recording loop ---
     ep_dir = os.path.join(save_dir, f"episode_{episode_num:04d}")
     os.makedirs(ep_dir, exist_ok=True)
     frames_dirs = {}
@@ -162,7 +109,6 @@ def main():
     states = []
     timestamps = []
     frame_count = 0
-    fps_target = 15
     frame_interval = 1.0 / fps_target
 
     # Use a thread to listen for 'stop'
@@ -259,6 +205,117 @@ def main():
         print(f"  Frames ({name}): {d}")
     print(f"  Data: {os.path.join(ep_dir, 'episode_data.json')}")
     sys.stdout.flush()
+    return True
+
+
+def main():
+    # ── Windows-aware default ports ────────────────────────────
+    # These will be updated after running scan_motors.py / scan_leader.py
+    if IS_WINDOWS:
+        default_follower = "COM12"  # USB SER=5A7C120825 — verified 6 motors
+        default_leader = "COM11"   # USB SER=5AAF288338 — verified 6 motors
+    else:
+        default_follower = "/dev/tty.usbmodem5A7C1208251"
+        default_leader = "/dev/tty.usbmodem5AAF2883381"
+
+    follower_port = sys.argv[1] if len(sys.argv) > 1 else default_follower
+    leader_port = sys.argv[2] if len(sys.argv) > 2 else default_leader
+    save_dir = sys.argv[3] if len(sys.argv) > 3 else os.path.expanduser(
+        "~/.cache/huggingface/lerobot/siddhantjain/pick_bottle_training"
+    )
+    target_episodes = int(sys.argv[4]) if len(sys.argv) > 4 else 20
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    # ── Camera map ─────────────────────────────────────────────
+    # CRITICAL: These indices MUST be verified using camera_probe.py
+    # DO NOT change these without visual confirmation!
+    cam_map = {"cam_high": 1, "cam_wrist": 2}  # VERIFIED 2026-07-02: 0=laptop(black), 1=overhead, 2=wrist
+
+    # ── Connect cameras ────────────────────────────────────────
+    print("Connecting cameras...")
+    print(f"  Backend: {'DirectShow' if IS_WINDOWS else 'Default'}")
+    cams = []
+    for name, idx in cam_map.items():
+        print(f"  Opening {name} (index {idx})...", flush=True)
+        tcam = ThreadedCamera(idx)
+        if tcam.is_opened():
+            if tcam.start():
+                w, h = tcam.resolution()
+                cams.append((name, tcam))
+                print(f"  [OK] Connected {name} -> camera index {idx} ({w}x{h})", flush=True)
+            else:
+                print(f"  [WARN] {name} (index {idx}) opened but no frames!", flush=True)
+                tcam.release()
+        else:
+            print(f"  [WARN] {name} (index {idx}) failed to open!", flush=True)
+
+    if not cams:
+        print("  FATAL: No cameras found! Exiting.")
+        return
+
+    # ── Connect robot arms ─────────────────────────────────────
+    print(f"\nConnecting follower arm on {follower_port}...")
+    follower_cfg = SOFollowerRobotConfig(port=follower_port, id="my_follower")
+    follower = SOFollower(follower_cfg)
+    follower.connect()
+    print("  [OK] Follower connected.")
+
+    print(f"Connecting leader arm on {leader_port}...")
+    leader_cfg = SOLeaderTeleopConfig(port=leader_port, id="my_leader")
+    leader = SOLeader(leader_cfg)
+    leader.connect()
+    print("  [OK] Leader connected.")
+
+    # ── Multi-episode recording loop ───────────────────────────
+    # Figure out next episode number
+    existing = [d for d in os.listdir(save_dir) if d.startswith("episode_")]
+    episode_num = len(existing)
+
+    print()
+    print("=" * 60)
+    print(f"  SO-100 EPISODE RECORDER")
+    print(f"  Save directory: {save_dir}")
+    print(f"  Starting from episode: {episode_num}")
+    print(f"  Target: {target_episodes} episodes")
+    print(f"  Cameras: {[n for n, _ in cams]}")
+    print("=" * 60)
+
+    while episode_num < target_episodes + len(existing):
+        print()
+        print(f"  READY TO RECORD EPISODE {episode_num}")
+        print("  Type 'start' to begin | 'skip' to skip | 'quit' to exit")
+        sys.stdout.flush()
+
+        while True:
+            cmd = input(">> ").strip().lower()
+            if cmd == "start":
+                break
+            elif cmd == "skip":
+                episode_num += 1
+                print(f"  Skipped. Next episode: {episode_num}")
+                break
+            elif cmd == "quit":
+                print("Quitting.")
+                follower.disconnect()
+                leader.disconnect()
+                for _, c in cams:
+                    c.release()
+                return
+            else:
+                print(f"Unknown command '{cmd}'. Type 'start', 'skip', or 'quit'.")
+                sys.stdout.flush()
+        else:
+            continue
+
+        success = record_single_episode(episode_num, save_dir, cams, follower, leader)
+        if success:
+            episode_num += 1
+            remaining = target_episodes + len(existing) - episode_num
+            if remaining > 0:
+                print(f"\n  [OK] {remaining} episodes remaining.")
+            else:
+                print(f"\n  [DONE] ALL {target_episodes} EPISODES COMPLETE!")
 
     # Cleanup
     for _, c in cams:

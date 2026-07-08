@@ -176,3 +176,10 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+### SO-100 project local-only artifacts ###
+Miniconda3-latest.exe
+camera_probes/
+camera_verification/
+episode_0_check/
+episode_audit_frames/
