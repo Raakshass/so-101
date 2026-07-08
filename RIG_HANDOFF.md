@@ -2,6 +2,7 @@
 
 **Date:** 2026-07-08 · **From:** Windows laptop (RTX 3050 4GB) · **To:** PC rig (RTX 5090 32GB)
 **Owner:** Raakshass (HF) / Siddhant Jain · **Repo:** https://github.com/Raakshass/so-101
+**Codebase:** LeRobot **v0.6.0** (upstream release tag merged 2026-07-08; includes the MolmoAct2 SO-100/101 calibration correction, PR #3879)
 
 This file is the source of truth for continuing the project on the rig.
 **Agent instruction: verify every command against `src/lerobot` before running — this repo IS the LeRobot install (editable), so the code on disk is definitive.**
@@ -41,6 +42,13 @@ pip install -e ".[feetech]"
 pip install num2words            # required by SmolVLM/SmolVLA processor
 huggingface-cli login            # account: Raakshass (needed to push datasets/models)
 ```
+
+**Version policy:** this fork is pinned to the **LeRobot v0.6.0 release** (verify: `python -c "import lerobot; print(lerobot.__version__)"` from OUTSIDE the repo dir → `0.6.0`). To pull future upstream releases:
+```bash
+git remote add upstream https://github.com/huggingface/lerobot.git   # if not present
+git fetch upstream tag vX.Y.Z && git merge vX.Y.Z && pip install -e ".[feetech]"
+```
+Re-read the release notes and `docs/source/backwardcomp.mdx` before syncing — calibration conventions have changed across LeRobot versions before.
 
 ## 4. Restore calibration (BEFORE first connect)
 
@@ -121,17 +129,22 @@ python -m lerobot.scripts.lerobot_train \
 ```
 
 **c) MolmoAct2 LoRA (capability ceiling — 7B, needs the 5090):**
+
+⚠️ **Use the SO-100-corrected checkpoint as the base**: `lerobot/MolmoAct2-SO100_101-LeRobot` (verified on Hub). The raw MolmoAct2-SO100_101 weights were trained under an older joint-calibration convention than LeRobot ≥ 0.5.0 — **without the frame correction the arm moves in the wrong direction**. The `lerobot/...-LeRobot` conversion has the correction built into its processor pipeline; if you ever start from the raw checkpoint instead, you must set `--policy.joint_signs="[1,-1,1,1,1,1]" --policy.joint_offsets="[0,90,90,0,0,0]"`. Full details: `docs/source/molmoact2.mdx` → "Hardware Deployment" (added in PR #3879, included in this repo).
+
 ```bash
 python -m lerobot.scripts.lerobot_train \
-    --policy.type=molmoact2 \
+    --policy.path=lerobot/MolmoAct2-SO100_101-LeRobot \
     --dataset.repo_id=Raakshass/so100_shape_sorting \
     --policy.enable_lora_vlm=true --policy.enable_lora_action_expert=true \
     --policy.gradient_checkpointing=true \
     --output_dir=outputs/molmoact2_shapes --job_name=molmoact2_shapes \
     --policy.device=cuda --batch_size=4 --steps=30000 --policy.push_to_hub=false
 ```
-Verified config facts (`configuration_molmoact2.py`): weights default `checkpoint_path="allenai/MolmoAct2"` (exists on Hub), `chunk_size=30`, `model_dtype="bfloat16"` default, `lora_rank=64` default, `rtc_config` supported.
+Generic base (non-SO-100 embodiments): `--policy.type=molmoact2` uses default `checkpoint_path="allenai/MolmoAct2"` (exists on Hub).
+Verified config facts (`configuration_molmoact2.py`): `chunk_size=30`, `model_dtype="bfloat16"` default, `lora_rank=64` default, `rtc_config` supported.
 **Constraints enforced by the config:** `enable_lora_action_expert` requires `enable_lora_vlm=true`; `train_action_expert_only=true` is **incompatible** with `enable_lora_vlm` and requires `action_mode="continuous"`. (An earlier analysis suggested combining them — the config will refuse.)
+**Bonus:** the SO-100 checkpoint can be tried **zero-shot** on the shape task before any training (`lerobot_rollout --policy.path=lerobot/MolmoAct2-SO100_101-LeRobot`) — expect low success, but it validates the whole inference path and gives a baseline for free.
 
 ## 9. Deployment / evaluation
 
